@@ -1,0 +1,1 @@
+# apart-global-south-hackathon-2026

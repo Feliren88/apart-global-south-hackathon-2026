@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+all_rows_checkpoint.json
+english_rows.json
+prompt-delete-rows.md
+inference/results/
+inference/results_smoke/

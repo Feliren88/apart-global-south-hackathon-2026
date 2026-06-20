@@ -1,0 +1,22 @@
+# Counterfactual VLM bias benchmark — inference + analysis deps
+torch>=2.5
+torchvision
+transformers>=4.57       # >=5.x recommended (Qwen3-VL, InternVL3-hf, Aya-Vision)
+accelerate>=1.0
+datasets>=3.0
+qwen-vl-utils
+timm
+einops
+pillow
+sentencepiece
+protobuf
+av
+pandas
+numpy
+PyYAML
+tqdm
+# analysis / charting
+matplotlib
+seaborn
+scikit-learn
+tabulate

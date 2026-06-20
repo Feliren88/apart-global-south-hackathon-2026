@@ -1,0 +1,6 @@
+anthropic>=0.40.0
+datasets>=3.0.0
+pandas>=2.0.0
+huggingface-hub>=0.24.0
+requests>=2.31.0
+pyarrow>=14.0.0

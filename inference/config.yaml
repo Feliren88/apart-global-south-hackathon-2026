@@ -1,0 +1,54 @@
+# ── Counterfactual VLM bias benchmark configuration ──────────────────────────
+# Override any of these from run.sh / CLI flags.
+
+output_dir: results
+
+# Which datasets to evaluate. Keys: pendulum | feliren | remote_sensing | objects3d
+datasets:
+  - pendulum
+  - feliren
+  - remote_sensing
+  - objects3d
+
+# Languages: "all" or an explicit list, e.g. [english, hindi, urdu, telugu]
+languages: all
+
+# Evaluation conditions (prompt templates in classify.py):
+#   inference          : image + counterfactual caption + question (+ abstain option)
+#   perception_control : image + question only, NO caption (perceptual ceiling)
+conditions:
+  - inference
+  - perception_control
+
+# Models to evaluate (run sequentially, one loaded at a time).
+# Keys -> see models.py MODEL_REGISTRY.
+models:
+  - qwen2.5-vl-7b
+  - internvl3-8b
+  - qwen3-vl-8b
+  - llava-onevision-7b
+  # - aya-vision-8b      # gated: needs license acceptance + HF_TOKEN
+
+# Cap rows per (dataset, language) group. Use null / -1 for ALL rows.
+max_samples_per_group: 25
+shuffle_seed: 1234
+
+# Generation
+max_new_tokens: 24
+dtype: bfloat16            # bfloat16 | float16 | float32
+device_map: auto
+attn_impl: null            # e.g. flash_attention_2 | sdpa | eager
+
+# Mechanistic interpretability — last-token hidden state per layer
+save_hidden_states: true
+max_hidden_state_samples: 150   # cap npz rows per model (size control)
+
+# HF auth: do NOT hardcode the token here. Export it instead:
+#   export HF_TOKEN=hf_...     (vlm_bench.py reads it via os.environ)
+# Needed only for gated models (e.g. aya-vision-8b).
+hf_token: null
+cache_dir: null
+
+# Force a fresh pull of upstream datasets (bypass HF cache). Use after a
+# dataset's columns/rows are updated upstream.
+force_redownload: false

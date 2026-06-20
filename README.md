@@ -394,9 +394,9 @@ The unified `AutoModelForImageTextToText` path handles most modern VLMs. If your
 ```bibtex
 @misc{feliren2026multilingualcounterfactual,
     title     = {Multilingual Counterfactual VLM Bias Benchmark},
-    author    = {Feliren and APART Global South Hackathon Team},
+    author    = {X},
     year      = {2026},
-    publisher = {HuggingFace},
+    publisher = {d},
     url       = {https://huggingface.co/datasets/feliren/multilingual-counterfactual}
 }
 ```

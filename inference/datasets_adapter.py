@@ -149,9 +149,15 @@ def load_records(
     ds = load_dataset(spec["hf_id"], split=spec["split"], cache_dir=cache_dir,
                       download_mode=dl_mode)
 
+    # Normalise the language selector. Accept the sentinel "all" as either the
+    # bare string or inside a list (argparse nargs="*" turns `--languages all`
+    # into ["all"]); in both cases apply no filter.
     lang_filter = None
-    if languages != "all" and languages is not None:
-        lang_filter = {str(l).strip().lower() for l in languages}
+    if languages is not None and languages != "all":
+        langs = [languages] if isinstance(languages, str) else list(languages)
+        wanted = {str(l).strip().lower() for l in langs}
+        if "all" not in wanted:
+            lang_filter = wanted
 
     # Group indices by language so caps are applied per-language.
     by_lang: dict[str, list[int]] = {}

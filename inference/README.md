@@ -386,19 +386,7 @@ tabulate
 
 Install: `pip install -r requirements.txt`
 
----
 
-## Citation
-
-```bibtex
-@misc{feliren2026multilingualcounterfactual,
-    title     = {Multilingual Counterfactual VLM Bias Benchmark},
-    author    = {Feliren and APART Global South Hackathon Team},
-    year      = {2026},
-    publisher = {HuggingFace},
-    url       = {https://huggingface.co/datasets/feliren/multilingual-counterfactual}
-}
-```
 
 ---
 

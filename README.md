@@ -30,14 +30,14 @@ Current VLM safety evaluations are predominantly **English-only** and treat mode
 ├── requirements.txt                 # Dataset pipeline deps
 ├── inference/
 │   ├── vlm_bench.py                 # Benchmark orchestration engine
-│   ├── models.py                    # VLM registry + unified loader (27 models)
+│   ├── models.py                    # VLM registry + unified loader (27 models; 9 benchmarked)
 │   ├── datasets_adapter.py          # Unified record schema across 4 datasets
 │   ├── classify.py                  # MCQ prompt builder + answer parser + classifier
 │   ├── analyze.py                   # Post-hoc analysis + charts + probing
 │   ├── config.yaml                  # YAML configuration
 │   ├── run.sh                       # Shell runner with env-var overrides
-│   ├── run_all_models.sh            # Sweep all 23 non-gated models
-│   ├── run_19models_logit.sh        # Fast logit sweep over batch
+│   ├── run_all_models.sh            # Sweep all non-gated models in framework
+│   ├── run_19models_logit.sh        # Targeted logit sweep (batch-able models)
 │   └── requirements.txt             # Inference + analysis deps
 ├── steering/
 │   ├── run_steering.py              # 6-phase steering pipeline
@@ -118,7 +118,7 @@ vlm_bench.py              ← engine: model loop, (batched) scoring, hidden-stat
 ├─ datasets_adapter.py    → loads 4 counterfactual datasets into unified Record
 │                            (pendulum, feliren, remote_sensing, objects3d)
 │
-├─ models.py              → MODEL_REGISTRY (27 VLMs) + unified loader + letter-token ids
+├─ models.py              → MODEL_REGISTRY (27 VLMs supported; 9 benchmarked) + unified loader
 │                            using AutoModelForImageTextToText + AutoProcessor
 │
 ├─ classify.py            → eval CONDITIONS (inference / perception_control)
@@ -182,78 +182,23 @@ The parser maps free-form VLM output to one of 5 categories through 6 increasing
 | `conflict_abstain` | Chose option D (conflict abstention) | **Conflict-aware** — detects and flags the mismatch |
 | `other` | Unparseable, refused, or unrelated | **Degenerate output** |
 
-### Model Registry
+### Models Benchmarked
 
-The framework supports 27 VLMs from 10+ organisations (23 non-gated, 4 gated):
+9 VLMs spanning 5 organisations across China, US, Singapore — evaluated on all 4 datasets across languages:
 
-```python
-MODEL_REGISTRY = {
-    # China · Alibaba
-    "qwen2.5-vl-7b":    "Qwen/Qwen2.5-VL-7B-Instruct",
-    "qwen2.5-vl-3b":    "Qwen/Qwen2.5-VL-3B-Instruct",
-    "qwen3-vl-8b":      "Qwen/Qwen3-VL-8B-Instruct",
+| Model | Origin | Size | Scores |
+|-------|--------|------|--------|
+| `qwen2.5-vl-7b` | 🇨🇳 Alibaba | 7B | logit |
+| `qwen2.5-vl-3b` | 🇨🇳 Alibaba | 3B | logit |
+| `qwen3-vl-8b` | 🇨🇳 Alibaba | 8B | logit |
+| `internvl3-8b` | 🇨🇳 Shanghai AI Lab | 8B | logit |
+| `internvl3-2b` | 🇨🇳 Shanghai AI Lab | 2B | logit |
+| `glm-4.1v-9b-thinking` | 🇨🇳 Zhipu AI | 9B | logit |
+| `granite-vision-3.3-2b` | 🇺🇸 IBM | 2B | logit |
+| `llava-onevision-7b` | 🌍 Community | 7B | logit |
+| `sea-lion-v4-8b-vl` | 🇸🇬 AI Singapore | 8B | logit |
 
-    # China · Shanghai AI Lab
-    "internvl3-8b":     "OpenGVLab/InternVL3-8B-hf",
-    "internvl3-2b":     "OpenGVLab/InternVL3-2B-hf",
-
-    # China · Zhipu AI
-    "glm-4.1v-9b-thinking": "zai-org/GLM-4.1V-9B-Thinking",
-
-    # China · OpenBMB
-    "minicpm-v-4.5":    "openbmb/MiniCPM-V-4_5",
-    "minicpm-v-4":      "openbmb/MiniCPM-V-4",
-
-    # China · AIDC-AI / Alibaba Intl
-    "ovis2-8b":         "AIDC-AI/Ovis2-8B",
-
-    # China · Moonshot AI
-    "kimi-vl-a3b":      "moonshotai/Kimi-VL-A3B-Instruct",
-
-    # China · DeepSeek
-    "deepseek-vl2-small": "deepseek-ai/deepseek-vl2-small",
-
-    # US · Meta
-    "llama-3.2-11b-vision": "meta-llama/Llama-3.2-11B-Vision-Instruct",  # gated
-
-    # US · Microsoft
-    "phi-4-multimodal": "microsoft/Phi-4-multimodal-instruct",
-    "phi-3.5-vision":   "microsoft/Phi-3.5-vision-instruct",
-
-    # US · Allen AI
-    "molmo2-8b":        "allenai/Molmo2-8B",
-    "molmo-7b-d":       "allenai/Molmo-7B-D-0924",
-
-    # US · IBM
-    "granite-vision-3.3-2b": "ibm-granite/granite-vision-3.3-2b",
-
-    # US · Google
-    "gemma-3-4b":       "google/gemma-3-4b-it",     # gated
-    "gemma-3-12b":      "google/gemma-3-12b-it",    # gated
-
-    # Canada · Cohere
-    "aya-vision-8b":    "CohereLabs/aya-vision-8b",  # gated
-
-    # France · Mistral
-    "pixtral-12b":      "mistral-community/pixtral-12b",
-
-    # France · HuggingFace
-    "smolvlm2-2.2b":    "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
-
-    # India · Krutrim / Ola
-    "chitrarth":        "krutrim-ai-labs/Chitrarth",
-
-    # Singapore · AI Singapore
-    "sea-lion-v4-8b-vl": "aisingapore/Qwen-SEA-LION-v4-8B-VL",
-    "sea-lion-v4-4b-vl": "aisingapore/Gemma-SEA-LION-v4-4B-VL",
-
-    # Community
-    "llava-onevision-7b": "llava-hf/llava-onevision-qwen2-7b-ov-hf",
-    "moondream2":       "vikhyatk/moondream2",
-}
-```
-
-Models use **`transformers>=5`** with the unified `AutoModelForImageTextToText` + `AutoProcessor` API and chat templates, eliminating per-family special casing.
+All scored via **logit-based** single-forward-pass with right-padded batching (`batch_size=8`). The framework supports 27 VLMs total — see [`models.py`](inference/models.py) for the full registry.
 
 ### Running the Benchmark
 
@@ -265,9 +210,9 @@ cd inference
 # Basic run (config.yaml defaults)
 ./run.sh
 
-# One-command sweeps
-nohup bash run_19models_logit.sh > run.log 2>&1 &   # fast logit sweep over 19 models
-nohup bash run_all_models.sh &                       # all 23 non-gated models
+# Sweep scripts (adapt the model list inside to target specific sets)
+nohup bash run_19models_logit.sh > run.log 2>&1 &
+nohup bash run_all_models.sh &
 
 # Single run with env overrides
 MODELS="qwen2.5-vl-7b" DATASETS="feliren pendulum" ./run.sh

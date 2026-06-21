@@ -45,6 +45,7 @@ DEFAULT_CONFIG = {
     "shuffle_seed": 1234,
     "max_new_tokens": 24,
     "scoring": "logit",          # "logit" (1 forward pass, fast) | "generate"
+    "batch_size": 8,             # logit mode: items per forward pass (OOM auto-halves)
     "dtype": "bfloat16",
     "device_map": "auto",
     "attn_impl": "sdpa",
@@ -145,7 +146,58 @@ def score_answer(lm, inputs, letter_ids, want_hidden):
     return chosen, scores, hidden_vec
 
 
+def score_answer_batch(lm, inputs, letter_ids, want_hidden_flags):
+    """Batched logit-scoring: ONE forward pass over a padded batch of prompts.
+
+    Inputs are RIGHT-padded so a raw forward() assigns correct position ids to
+    each row's real tokens (the trailing pads get bogus positions but are never
+    read, and causal attention keeps real tokens from attending to them). For
+    each row we read the next-token logits at its last real position and take
+    the max logit over each letter's token-id variants; argmax is the answer.
+    Per-row last-prompt-token hidden states are sliced from the same pass.
+
+    Returns a list of (chosen_letter, letter_scores, hidden_vec) per row.
+    """
+    import torch
+
+    device = next(lm.model.parameters()).device
+    inputs = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+    need_hidden = any(want_hidden_flags)
+    with torch.no_grad():
+        out = lm.model(**inputs, output_hidden_states=need_hidden, use_cache=False)
+
+    logits = out.logits  # [B, seq, vocab]
+    B = logits.shape[0]
+    attn = inputs.get("attention_mask")
+    if attn is not None:
+        last_idx = [int(attn[i].nonzero(as_tuple=True)[0][-1].item()) for i in range(B)]
+    else:
+        last_idx = [logits.shape[1] - 1] * B
+
+    results = []
+    for i in range(B):
+        li = last_idx[i]
+        row_logits = logits[i, li, :].float()
+        scores = {}
+        for L, ids in letter_ids.items():
+            if ids:
+                scores[L] = max(float(row_logits[t]) for t in ids)
+        chosen = max(scores, key=scores.get) if scores else None
+
+        hidden_vec = None
+        if want_hidden_flags[i] and need_hidden and getattr(out, "hidden_states", None):
+            try:
+                per_layer = [h[i, li, :].float().cpu().numpy() for h in out.hidden_states]
+                hidden_vec = np.stack(per_layer, axis=0).astype(np.float16)
+            except Exception:
+                hidden_vec = None
+        scores = {L: round(v, 3) for L, v in scores.items()}
+        results.append((chosen, scores, hidden_vec))
+    return results
+
+
 def run():
+    import torch
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=None)
     ap.add_argument("--output_dir", default=None)
@@ -156,6 +208,7 @@ def run():
     ap.add_argument("--max_samples_per_group", type=int, default=None)
     ap.add_argument("--max_new_tokens", type=int, default=None)
     ap.add_argument("--scoring", choices=["logit", "generate"], default=None)
+    ap.add_argument("--batch_size", type=int, default=None)
     ap.add_argument("--attn_impl", default=None)
     ap.add_argument("--dtype", default=None)
     ap.add_argument("--no_hidden_states", action="store_true")
@@ -177,6 +230,7 @@ def run():
         cfg["max_samples_per_group"] = args.max_samples_per_group
     if args.max_new_tokens is not None: cfg["max_new_tokens"] = args.max_new_tokens
     if args.scoring: cfg["scoring"] = args.scoring
+    if args.batch_size is not None: cfg["batch_size"] = args.batch_size
     if args.attn_impl: cfg["attn_impl"] = args.attn_impl
     if args.dtype: cfg["dtype"] = args.dtype
     if args.no_hidden_states: cfg["save_hidden_states"] = False
@@ -277,84 +331,160 @@ def run():
         # global safety ceiling `max_hidden_state_samples`. This guarantees every
         # dataset x language cell is represented so the residual-stream activations
         # can be probed per-dataset and per-language, not just per-model.
-        hs = {c: {"arrays": [], "meta": [], "cells": {}} for c in conditions}
+        hs = {c: {"arrays": [], "meta": [], "cells": {}, "reserved": 0}
+              for c in conditions}
         per_cell = cfg.get("max_hidden_per_cell", 20)
         global_cap = cfg.get("max_hidden_state_samples", 10**9) or 10**9
         done = 0
         total = len(records) * len(conditions)
         t_model = time.time()
-        for rec in records:
-            for cond in conditions:
-                mcq = clf.build_mcq(rec, cfg["shuffle_seed"], cond)
-                cell = (rec.dataset, rec.language)
-                try:
-                    inputs = mdl.build_inputs(lm, rec.image, mcq["prompt"])
-                    want_hidden = (
-                        cfg["save_hidden_states"]
-                        and hs[cond]["cells"].get(cell, 0) < per_cell
-                        and len(hs[cond]["arrays"]) < global_cap
-                    )
-                    t_g = time.time()
-                    if scoring == "logit":
-                        raw, letter_scores, hidden_vec = score_answer(
-                            lm, inputs, letter_ids, want_hidden
-                        )
-                        res = clf.classify_letter(raw, mcq)
-                    else:
-                        raw, hidden_vec = generate_answer(
-                            lm, inputs, cfg["max_new_tokens"], want_hidden
-                        )
-                        res = clf.classify(raw, mcq)
-                        letter_scores = None
-                    dt = time.time() - t_g
-                except Exception as e:
-                    log_err(stage="inference", model=mkey, uid=rec.uid,
-                            condition=cond, error=str(e), tb=traceback.format_exc())
-                    continue
-                if hidden_vec is not None:
-                    hs[cond]["arrays"].append(hidden_vec)
-                    hs[cond]["meta"].append(
-                        {"uid": rec.uid, "category": res["category"],
-                         "dataset": rec.dataset, "language": rec.language})
-                    hs[cond]["cells"][cell] = hs[cond]["cells"].get(cell, 0) + 1
 
-                row = {
-                    "run_id": run_id,
-                    "model": mkey,
-                    "hf_id": lm.hf_id,
-                    "condition": cond,
-                    "dataset": rec.dataset,
-                    "language": rec.language,
-                    "row_index": rec.row_index,
-                    "uid": rec.uid,
-                    "question": rec.question,
-                    "cf_caption": rec.cf_caption,
-                    "original_caption": rec.original_caption,
-                    "image_bias_answer": rec.image_bias_answer,
-                    "text_bias_answer": rec.text_bias_answer,
-                    "distractor": rec.distractor,
-                    "letter_to_cat": mcq["letter_to_cat"],
-                    "letter_to_text": mcq["letter_to_text"],
-                    "raw_output": raw,
-                    "chosen_letter": res["chosen_letter"],
-                    "chosen_text": res["chosen_text"],
-                    "parse_method": res["parse_method"],
-                    "category": res["category"],
-                    "scoring": scoring,
-                    "letter_scores": letter_scores,
-                    "latency_s": round(dt, 3),
-                    "has_hidden_state": hidden_vec is not None,
-                    "max_new_tokens": cfg["max_new_tokens"],
-                    "dtype": cfg["dtype"],
-                    "extra": rec.extra,
-                    "ts": utcnow(),
-                }
-                results_f.write(json.dumps(row, default=str) + "\n")
-                done += 1
-                if done % 40 == 0:
-                    results_f.flush()
-                    rate = done / (time.time() - t_model)
-                    print(f"  {mkey}: {done}/{total}  ({rate:.2f} rec/s)", flush=True)
+        def reserve_hidden(cond, cell):
+            """Decide AND reserve a stratified hidden-state slot up front, so the
+            batched and per-item paths agree on the quota before the forward pass.
+            A reserved slot whose capture later fails is simply left empty (rare)."""
+            if not cfg["save_hidden_states"]:
+                return False
+            cells = hs[cond]["cells"]
+            if cells.get(cell, 0) >= per_cell or hs[cond]["reserved"] >= global_cap:
+                return False
+            cells[cell] = cells.get(cell, 0) + 1
+            hs[cond]["reserved"] += 1
+            return True
+
+        def emit_row(rec, cond, mcq, raw, res, letter_scores, hidden_vec, dt):
+            nonlocal done
+            if hidden_vec is not None:
+                hs[cond]["arrays"].append(hidden_vec)
+                hs[cond]["meta"].append(
+                    {"uid": rec.uid, "category": res["category"],
+                     "dataset": rec.dataset, "language": rec.language})
+            row = {
+                "run_id": run_id,
+                "model": mkey,
+                "hf_id": lm.hf_id,
+                "condition": cond,
+                "dataset": rec.dataset,
+                "language": rec.language,
+                "row_index": rec.row_index,
+                "uid": rec.uid,
+                "question": rec.question,
+                "cf_caption": rec.cf_caption,
+                "original_caption": rec.original_caption,
+                "image_bias_answer": rec.image_bias_answer,
+                "text_bias_answer": rec.text_bias_answer,
+                "distractor": rec.distractor,
+                "letter_to_cat": mcq["letter_to_cat"],
+                "letter_to_text": mcq["letter_to_text"],
+                "raw_output": raw,
+                "chosen_letter": res["chosen_letter"],
+                "chosen_text": res["chosen_text"],
+                "parse_method": res["parse_method"],
+                "category": res["category"],
+                "scoring": scoring,
+                "letter_scores": letter_scores,
+                "latency_s": round(dt, 3),
+                "has_hidden_state": hidden_vec is not None,
+                "max_new_tokens": cfg["max_new_tokens"],
+                "dtype": cfg["dtype"],
+                "extra": rec.extra,
+                "ts": utcnow(),
+            }
+            results_f.write(json.dumps(row, default=str) + "\n")
+            done += 1
+            if done % 40 == 0:
+                results_f.flush()
+                rate = done / (time.time() - t_model)
+                print(f"  {mkey}: {done}/{total}  ({rate:.2f} rec/s)", flush=True)
+
+        def run_one_item(rec, cond, mcq, want):
+            try:
+                inputs = mdl.build_inputs(lm, rec.image, mcq["prompt"])
+                t_g = time.time()
+                if scoring == "logit":
+                    raw, letter_scores, hidden_vec = score_answer(
+                        lm, inputs, letter_ids, want)
+                    res = clf.classify_letter(raw, mcq)
+                else:
+                    raw, hidden_vec = generate_answer(
+                        lm, inputs, cfg["max_new_tokens"], want)
+                    res = clf.classify(raw, mcq)
+                    letter_scores = None
+                dt = time.time() - t_g
+            except Exception as e:
+                log_err(stage="inference", model=mkey, uid=rec.uid,
+                        condition=cond, error=str(e), tb=traceback.format_exc())
+                return
+            emit_row(rec, cond, mcq, raw, res, letter_scores, hidden_vec, dt)
+
+        def process_chunk(items):
+            """Score a batch of (rec, cond, mcq, want) in ONE forward pass. On
+            CUDA OOM, recursively halve the batch; on any other batched failure,
+            fall back to per-item so no model is left unsupported."""
+            imgs = [it[0].image for it in items]
+            prompts = [it[2]["prompt"] for it in items]
+            wants = [it[3] for it in items]
+            t_g = time.time()
+            try:
+                inputs = mdl.build_inputs_batch(lm, imgs, prompts)
+                outs = score_answer_batch(lm, inputs, letter_ids, wants)
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                if len(items) == 1:
+                    rec, cond = items[0][0], items[0][1]
+                    log_err(stage="inference_oom", model=mkey, uid=rec.uid,
+                            condition=cond)
+                    return
+                mid = len(items) // 2
+                process_chunk(items[:mid])
+                process_chunk(items[mid:])
+                return
+            except Exception as e:
+                log_err(stage="batch_fallback", model=mkey, error=str(e),
+                        tb=traceback.format_exc())
+                for rec, cond, mcq, want in items:
+                    run_one_item(rec, cond, mcq, want)
+                return
+            dt = (time.time() - t_g) / max(len(items), 1)
+            for (rec, cond, mcq, _), (chosen, scores, hv) in zip(items, outs):
+                res = clf.classify_letter(chosen, mcq)
+                emit_row(rec, cond, mcq, chosen, res, scores, hv, dt)
+
+        # ── Choose path: batched logit scoring (fast) or per-item ────────────
+        batch_size = int(cfg.get("batch_size", 1) or 1)
+        use_batch = scoring == "logit" and batch_size > 1 and len(records) > 0
+        if use_batch:
+            try:  # capability probe: build + forward a 2-item batch
+                p_img = [records[0].image, records[0].image]
+                p_prompt = [clf.build_mcq(
+                    records[0], cfg["shuffle_seed"], conditions[0])["prompt"]] * 2
+                p_in = mdl.build_inputs_batch(lm, p_img, p_prompt)
+                score_answer_batch(lm, p_in, letter_ids, [False, False])
+                print(f"  batched logit scoring enabled (batch_size={batch_size})",
+                      flush=True)
+            except Exception as e:
+                print(f"  batched path unavailable for {mkey} "
+                      f"({type(e).__name__}: {e}); using batch=1", flush=True)
+                use_batch = False
+
+        if use_batch:
+            buf = []
+            for rec in records:
+                for cond in conditions:
+                    mcq = clf.build_mcq(rec, cfg["shuffle_seed"], cond)
+                    want = reserve_hidden(cond, (rec.dataset, rec.language))
+                    buf.append((rec, cond, mcq, want))
+                    if len(buf) >= batch_size:
+                        process_chunk(buf)
+                        buf = []
+            if buf:
+                process_chunk(buf)
+        else:
+            for rec in records:
+                for cond in conditions:
+                    mcq = clf.build_mcq(rec, cfg["shuffle_seed"], cond)
+                    want = reserve_hidden(cond, (rec.dataset, rec.language))
+                    run_one_item(rec, cond, mcq, want)
 
         results_f.flush()
         # Save hidden states per (model, condition).

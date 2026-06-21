@@ -41,6 +41,12 @@ shuffle_seed: 1234
 #   generate : legacy free-text generation + regex parsing (slower; keeps raw text).
 scoring: logit
 
+# Logit mode: number of items scored per forward pass. Larger = faster on a big
+# GPU; on CUDA OOM the batch auto-halves down to 1, and any model whose processor
+# can't batch falls back to per-item — so this is safe to leave high.
+# Set to 1 to disable batching.
+batch_size: 8
+
 # Generation (only used when scoring: generate)
 max_new_tokens: 24
 dtype: bfloat16            # bfloat16 | float16 | float32

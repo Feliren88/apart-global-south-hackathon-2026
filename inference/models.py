@@ -217,6 +217,51 @@ def letter_token_ids(lm: LoadedModel, letters=("A", "B", "C", "D")) -> dict[str,
     return out
 
 
+def build_inputs_batch(lm: LoadedModel, images: list, prompts: list[str]):
+    """Build a RIGHT-padded batch of inputs from parallel (image, prompt) lists.
+
+    Right padding (not the usual left padding for generation) is deliberate: we
+    do a single scoring forward pass, not autoregressive decoding, so each row's
+    real tokens must occupy positions 0..n-1 to get correct position ids. We then
+    read each row's last real token via its attention mask.
+    """
+    proc = lm.processor
+    tok = get_tokenizer(lm)
+    try:
+        tok.padding_side = "right"
+    except Exception:
+        pass
+    if getattr(tok, "pad_token_id", None) is None and getattr(tok, "eos_token", None):
+        try:
+            tok.pad_token = tok.eos_token
+        except Exception:
+            pass
+
+    messages = [
+        [{"role": "user", "content": [
+            {"type": "image", "image": img},
+            {"type": "text", "text": p},
+        ]}]
+        for img, p in zip(images, prompts)
+    ]
+    try:
+        return proc.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            padding=True,
+        )
+    except Exception:
+        # Fallback: render each text template, then batch over text+images.
+        texts = [
+            proc.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+            for m in messages
+        ]
+        return proc(text=texts, images=list(images), return_tensors="pt", padding=True)
+
+
 def free_model(lm: LoadedModel) -> None:
     import gc
 

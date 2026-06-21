@@ -3,7 +3,7 @@
 
 output_dir: results
 
-# Which datasets to evaluate. Keys: pendulum | feliren | remote_sensing | objects3d
+# Which datasets to evaluate (from apart-global-south-hack org). Keys: pendulum | feliren | remote_sensing | objects3d
 datasets:
   - pendulum
   - feliren

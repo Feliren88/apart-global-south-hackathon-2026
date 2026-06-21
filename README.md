@@ -55,10 +55,13 @@ Current VLM safety evaluations are predominantly **English-only** and treat mode
 
 ### Data Source
 
-| Dataset | HuggingFace | Description |
-|---------|-------------|-------------|
-| Source | [`geoskyr/COCO-Counterfactual`](https://huggingface.co/datasets/geoskyr/COCO-Counterfactual) | COCO images with original + counterfactual caption pairs |
-| Ours | [`feliren/multilingual-counterfactual`](https://huggingface.co/datasets/feliren/multilingual-counterfactual) | 750 rows × 5 languages, with embedded images + auto-generated MCQs |
+| Dataset | HuggingFace | Description | Languages |
+|---------|-------------|-------------|-----------|
+| Source | [`geoskyr/COCO-Counterfactual`](https://huggingface.co/datasets/geoskyr/COCO-Counterfactual) | COCO images with original + counterfactual caption pairs | — |
+| `multilingual-counterfactual` | [`apart-global-south-hack/multilingual-counterfactual`](https://huggingface.co/datasets/apart-global-south-hack/multilingual-counterfactual) | COCO-based, object/word swaps | en, hi, ur, te, id |
+| `counterfactual-pendulum` | [`apart-global-south-hack/counterfactual-pendulum-multilingual`](https://huggingface.co/datasets/apart-global-south-hack/counterfactual-pendulum-multilingual) | Pendulum physics (position, colour) | en, hi, te, id, ar, fr, es, zh, bn |
+| `remote_sensing` | [`apart-global-south-hack/remote_sensing_VQA_multilingual`](https://huggingface.co/datasets/apart-global-south-hack/remote_sensing_VQA_multilingual) | Satellite imagery | en, hi, te |
+| `objects3d` | [`apart-global-south-hack/multilingual-crossmodal-conflict-3D_Objects`](https://huggingface.co/datasets/apart-global-south-hack/multilingual-crossmodal-conflict-3D_Objects) | 3D rendered objects | en, hi, te |
 
 ### Schema
 

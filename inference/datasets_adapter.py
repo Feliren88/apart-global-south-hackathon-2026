@@ -26,7 +26,7 @@ from datasets import load_dataset
 # Each value maps a *unified* field -> the source column name in that dataset.
 DATASET_REGISTRY: dict[str, dict[str, Any]] = {
     "pendulum": {
-        "hf_id": "akanshjain37/counterfactual-pendulum-multilingual",
+        "hf_id": "apart-global-south-hack/counterfactual-pendulum-multilingual",
         "split": "train",
         "cols": {
             "image": "image",
@@ -41,7 +41,7 @@ DATASET_REGISTRY: dict[str, dict[str, Any]] = {
         "extra_cols": ["conflict_type", "original_row_index"],
     },
     "feliren": {
-        "hf_id": "feliren/multilingual-counterfactual",
+        "hf_id": "apart-global-south-hack/multilingual-counterfactual",
         "split": "train",
         "cols": {
             "image": "image",
@@ -56,7 +56,7 @@ DATASET_REGISTRY: dict[str, dict[str, Any]] = {
         "extra_cols": ["serial_id", "changed_words"],
     },
     "remote_sensing": {
-        "hf_id": "Anvesh-Lankala/remote_sensing_VQA_multilingual",
+        "hf_id": "apart-global-south-hack/remote_sensing_VQA_multilingual",
         "split": "train",
         "cols": {
             "image": "image",
@@ -71,7 +71,7 @@ DATASET_REGISTRY: dict[str, dict[str, Any]] = {
         "extra_cols": ["original_row_index"],
     },
     "objects3d": {
-        "hf_id": "Anvesh-Lankala/multilingual-crossmodal-conflict-3D_Objects",
+        "hf_id": "apart-global-south-hack/multilingual-crossmodal-conflict-3D_Objects",
         "split": "train",
         "cols": {
             # Upstream renamed "original_image" -> "image" (now RGBA, converted

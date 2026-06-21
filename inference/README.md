@@ -140,10 +140,10 @@ Several non-gated models use custom code (`ovis2-8b`, `kimi-vl-a3b`, `deepseek-v
 
 | Key | HF ID | Content | Languages |
 |-----|-------|---------|-----------|
-| `feliren` | feliren/multilingual-counterfactual | COCO-based, object/word swaps | en, hi, ur, te, id |
-| `pendulum` | akanshjain37/counterfactual-pendulum-multilingual | Pendulum physics (position, colour) | en, hi, te, id, ar, fr, es, zh, bn |
-| `remote_sensing` | Anvesh-Lankala/remote_sensing_VQA_multilingual | Satellite imagery | en, hi, te |
-| `objects3d` | Anvesh-Lankala/multilingual-crossmodal-conflict-3D_Objects | 3D rendered objects | en, hi, te |
+| `multilingual-counterfactual` | [`apart-global-south-hack/multilingual-counterfactual`](https://huggingface.co/datasets/apart-global-south-hack/multilingual-counterfactual) | COCO-based, object/word swaps | en, hi, ur, te, id |
+| `counterfactual-pendulum` | [`apart-global-south-hack/counterfactual-pendulum-multilingual`](https://huggingface.co/datasets/apart-global-south-hack/counterfactual-pendulum-multilingual) | Pendulum physics (position, colour) | en, hi, te, id, ar, fr, es, zh, bn |
+| `remote_sensing` | [`apart-global-south-hack/remote_sensing_VQA_multilingual`](https://huggingface.co/datasets/apart-global-south-hack/remote_sensing_VQA_multilingual) | Satellite imagery | en, hi, te |
+| `objects3d` | [`apart-global-south-hack/multilingual-crossmodal-conflict-3D_Objects`](https://huggingface.co/datasets/apart-global-south-hack/multilingual-crossmodal-conflict-3D_Objects) | 3D rendered objects | en, hi, te |
 
 The `feliren` question column resolves from either `question` or the legacy `mcq_question` (first present wins). Add a dataset with one entry in `datasets_adapter.py:DATASET_REGISTRY` plus a column mapping.
 

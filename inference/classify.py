@@ -53,7 +53,7 @@ PROMPT_PERCEPTION = (
     "Question: {question}\n\n"
     "Options:\n{options}\n\n"
     "Based on the given input image, answer the question by choosing one of the "
-    "four options. Respond with only the letter (A, B, C, or D) of your chosen "
+    "four options. Respond with only the letter (A, B or C,) of your chosen "
     "option. Do not explain or output anything further."
 )
 

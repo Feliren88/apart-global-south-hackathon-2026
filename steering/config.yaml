@@ -1,0 +1,58 @@
+# ── Cross-lingual contrastive steering configuration ─────────────────────────
+# Builds on ../inference (same model loader, datasets, MCQ taxonomy).
+# Override any of these from run.sh / CLI flags.
+
+output_dir: steering_results
+
+# Datasets to evaluate. Keys: feliren | pendulum | remote_sensing | objects3d
+datasets:
+  - feliren
+  - pendulum
+  - remote_sensing
+  - objects3d
+
+# Languages: "all" or an explicit list, e.g. [english, hindi, telugu].
+languages: all
+
+# Source language S whose abstain vector is transferred to other languages
+# (Phase 4/6). Must be one of the evaluated languages.
+source_language: english
+
+# Models to steer (run sequentially, one loaded at a time). Keys -> ../inference/models.py
+models:
+  - qwen2.5-vl-3b
+
+# Cap rows per (dataset, language) group at load time. null / -1 = all rows.
+max_samples_per_group: null
+shuffle_seed: 1234
+
+# Held-out split: fraction of perception-validated items used to EVALUATE
+# steering (the rest fit the contrastive vector). Deterministic per uid.
+eval_fraction: 0.5
+
+# Phase 3 — target decoder-depth band for caching + steering (fraction of depth).
+target_frac_lo: 0.5
+target_frac_hi: 0.8
+
+# Phase 5 — steering-coefficient sweep. 0.0 is the unsteered baseline.
+alpha_sweep: [-8.0, -4.0, 0.0, 4.0, 8.0]
+
+# Phase 4 — the "success" (abstain) set for the contrastive vector. Default is
+# the explicit abstention (option D). Most VLMs abstain rarely, so if a language
+# has < min_class abstentions we optionally fall back to also using image_bias
+# (i.e. steer toward "do not follow the misleading text").
+success_categories: [conflict_abstain]
+fallback_success: true
+min_class: 5            # min items per class to derive a vector for a language
+
+# Cap eval items per language in the α-sweep / transfer phases (speed).
+eval_cap: 80
+
+dtype: bfloat16         # bfloat16 | float16 | float32
+device_map: auto
+attn_impl: sdpa         # eager | sdpa | flash_attention_2
+
+# HF auth: do NOT hardcode. Export instead:  export HF_TOKEN=hf_...
+hf_token: null
+cache_dir: null
+force_redownload: false

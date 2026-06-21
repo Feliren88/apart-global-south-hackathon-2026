@@ -61,13 +61,28 @@ Each language's actual success set is recorded in `vectors/<model>_meta.json`.
 - **`steer(layers, layer_vecs, α)`** is a context manager that registers a
   forward hook on each target layer adding `α·v̂` to that layer's output hidden
   states (all positions), and removes the hooks on exit.
-- **`forward_score(...)`** does a single forward pass: argmax over A/B/C/D
-  answer-token logits = the answer (the same logit-scoring path as
-  `../inference`), and optionally returns per-layer last-token activations and a
-  logit-lens `logit(D) − logit(best answer)` trace across depth.
+- **`forward_score(...)` / `forward_score_batch(...)`** do one forward pass:
+  argmax over A/B/C/D answer-token logits = the answer (the same logit-scoring
+  path as `../inference`), and optionally return per-layer last-token activations
+  and a logit-lens `logit(D) − logit(best answer)` trace across depth.
 
 No autoregressive decoding is used for scoring — steering is evaluated on the
 same fast single-forward logit path as the benchmark.
+
+### Throughput (batched scoring)
+
+All phases score in **right-padded batches** (`batch_size`, default 8) via
+`mdl.build_inputs_batch` — the same batched path the benchmark uses. Because
+right padding keeps each row's real tokens at positions `0..n-1`, the per-row
+answer is read at `attention_mask.sum(dim=1) − 1` (last real token); the steering
+hook adds `α·v̂` to the whole `[B, seq, hidden]` tensor unchanged.
+
+The α-sweep and transfer phases **pre-build each language's eval batches once**
+and reuse them across every α and every source vector — only the forward hook
+changes between passes, never the (expensive-to-preprocess) inputs. A batch that
+errors falls back to per-item scoring so one bad row never drops its chunk.
+Lower `batch_size` if Phase 2 (which also holds `output_hidden_states` for the
+batch) hits OOM.
 
 ---
 
@@ -142,6 +157,7 @@ python analyze_steering.py --output_dir steering_results
 | `fallback_success` | `true` | Widen success set with `image_bias` if too few abstentions |
 | `min_class` | `5` | Min items per class to derive a vector |
 | `eval_cap` | `80` | Cap eval items per language in α-sweep / transfer |
+| `batch_size` | `8` | Forward-pass batch size (all phases); lower on OOM |
 | `dtype` / `device_map` / `attn_impl` | `bfloat16` / `auto` / `sdpa` | Model load options |
 | `hf_token` | `null` | **Do not hardcode** — export `HF_TOKEN` |
 
@@ -149,9 +165,9 @@ python analyze_steering.py --output_dir steering_results
 
 ## Notes & limitations
 
-- **Scoring is single-forward logit-argmax** (no decoding). Phases 1/2 run one
-  forward per item; the α-sweep and transfer phases re-score eval items once per
-  α / source — `eval_cap` bounds this.
+- **Scoring is single-forward logit-argmax** (no decoding), in right-padded
+  batches of `batch_size`. The α-sweep and transfer phases re-score eval items
+  once per α / source (reusing pre-built batches) — `eval_cap` bounds this.
 - **Steering vectors are derived on the fit split and evaluated on the held-out
   eval split**, so reported steering effects are not fit on their test items.
 - **Off-target accuracy** is measured on the *perception-control* condition under

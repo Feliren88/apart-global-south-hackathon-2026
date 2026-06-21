@@ -8,7 +8,7 @@ english_rows.json
 prompt-delete-rows.md
 inference/results/
 inference/results_smoke/
-steering/steering_smoke/
-steering/steering_smoke2/
+steering/steering_smoke*/
+steering/steering_b8/
 steering/*.log
 steering/__pycache__/

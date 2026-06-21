@@ -63,6 +63,7 @@ DEFAULT_CONFIG = {
     "fallback_success": True,         # if too few abstentions, add image_bias
     "min_class": 5,                   # min items per class to derive a vector
     "eval_cap": 80,                   # cap items per language for the steer sweep
+    "batch_size": 8,                  # forward-pass batch size (all phases)
     "off_target_tol": 0.15,           # max off-target perception drop allowed when
                                       # selecting the steering alpha (Phase 5)
     "dtype": "bfloat16",
@@ -120,6 +121,7 @@ def main():
     ap.add_argument("--max_samples_per_group", type=int, default=None)
     ap.add_argument("--alpha_sweep", nargs="*", type=float, default=None)
     ap.add_argument("--eval_cap", type=int, default=None)
+    ap.add_argument("--batch_size", type=int, default=None)
     ap.add_argument("--min_class", type=int, default=None)
     ap.add_argument("--eval_fraction", type=float, default=None)
     ap.add_argument("--attn_impl", default=None)
@@ -138,6 +140,8 @@ def main():
         cfg["max_samples_per_group"] = args.max_samples_per_group
     if args.min_class is not None:
         cfg["min_class"] = args.min_class
+    if args.batch_size is not None:
+        cfg["batch_size"] = args.batch_size
     if args.eval_fraction is not None:
         cfg["eval_fraction"] = args.eval_fraction
     if args.force_redownload:
@@ -224,40 +228,104 @@ def main():
               f"target band={target_idxs[0]}..{target_idxs[-1]} | "
               f"lens={'on' if lens.usable else 'off'}", flush=True)
 
-        def score(rec, condition, want_hidden=False, want_lens=False,
-                  layer_vecs=None, alpha=0.0):
-            mcq = clf.build_mcq(rec, seed, condition)
+        bs = int(cfg.get("batch_size", 8))
+
+        def build_batches(recs, condition):
+            """Right-padded batches of (inputs, [(rec, mcq), ...]) of size <= bs.
+            The image preprocessor runs once per batch; for the steering phases
+            the returned batches are reused across every alpha / source vector.
+
+            If a chunk fails to batch (e.g. an image the batched processor can't
+            collate), it is stored with inputs=None and scored per-item later, so
+            one awkward image never blocks the rest of the run."""
+            out = []
+            for i in range(0, len(recs), bs):
+                chunk = recs[i:i + bs]
+                mcqs = [clf.build_mcq(r, seed, condition) for r in chunk]
+                metas = list(zip(chunk, mcqs))
+                try:
+                    inputs = mdl.build_inputs_batch(
+                        lm, [r.image for r in chunk], [m["prompt"] for m in mcqs])
+                except Exception as e:
+                    log_err(stage="build_batch", model=mkey, error=str(e),
+                            n=len(metas))
+                    inputs = None
+                out.append((inputs, metas))
+            return out
+
+        def _score_one(rec, mcq, want_hidden, want_lens, layer_vecs, alpha):
             inputs = mdl.build_inputs(lm, rec.image, mcq["prompt"])
             lt = lens if want_lens else None
             if layer_vecs and alpha:
                 with sc.steer(layers, layer_vecs, alpha):
-                    chosen, scores, hid, ld = sc.forward_score(
-                        lm, inputs, letter_ids, want_hidden, lt)
+                    ch, _, hid, ld = sc.forward_score(lm, inputs, letter_ids,
+                                                      want_hidden, lt)
             else:
-                chosen, scores, hid, ld = sc.forward_score(
-                    lm, inputs, letter_ids, want_hidden, lt)
-            res = clf.classify_letter(chosen, mcq)
-            return res, hid, ld
+                ch, _, hid, ld = sc.forward_score(lm, inputs, letter_ids,
+                                                  want_hidden, lt)
+            return clf.classify_letter(ch, mcq), hid, ld
+
+        def run_prebuilt(batches, stage, want_hidden=False, want_lens=False,
+                         layer_vecs=None, alpha=0.0):
+            """Score prebuilt batches, yielding (rec, mcq, res, hid, ld) per item.
+            On a batch failure, fall back to per-item scoring so a single bad row
+            never drops its whole chunk."""
+            lt = lens if want_lens else None
+
+            def per_item(metas):
+                for rec, mcq in metas:
+                    try:
+                        res, hid, ld = _score_one(rec, mcq, want_hidden,
+                                                  want_lens, layer_vecs, alpha)
+                        yield rec, mcq, res, hid, ld
+                    except Exception as e2:
+                        log_err(stage=stage, model=mkey, uid=rec.uid, error=str(e2))
+
+            for inputs, metas in batches:
+                if inputs is None:           # chunk failed to batch-build
+                    yield from per_item(metas)
+                    continue
+                try:
+                    if layer_vecs and alpha:
+                        with sc.steer(layers, layer_vecs, alpha):
+                            chosen, _, hids, lds = sc.forward_score_batch(
+                                lm, inputs, letter_ids, want_hidden, lt)
+                    else:
+                        chosen, _, hids, lds = sc.forward_score_batch(
+                            lm, inputs, letter_ids, want_hidden, lt)
+                    for k, (rec, mcq) in enumerate(metas):
+                        yield rec, mcq, clf.classify_letter(chosen[k], mcq), \
+                            hids[k], lds[k]
+                except Exception as e:
+                    log_err(stage=stage + "_batch", model=mkey, error=str(e),
+                            n=len(metas))
+                    yield from per_item(metas)
+
+        def stream_scored(recs, condition, stage, want_hidden=False,
+                          want_lens=False):
+            """Build + score one batch at a time (no reuse) — for phases that see
+            each item once, so batched inputs are not held in RAM all at once."""
+            for i in range(0, len(recs), bs):
+                batches = build_batches(recs[i:i + bs], condition)
+                yield from run_prebuilt(batches, stage, want_hidden, want_lens)
 
         # ── Phase 1: perception control → validated set ──────────────────────
-        print(f"  [P1] perception control over {len(all_records)} records",
-              flush=True)
+        print(f"  [P1] perception control over {len(all_records)} records "
+              f"(batch={bs})", flush=True)
         validated = []
-        for i, rec in enumerate(all_records):
-            try:
-                res, _, _ = score(rec, "perception_control")
-            except Exception as e:
-                log_err(stage="phase1", model=mkey, uid=rec.uid, error=str(e))
-                continue
+        done = 0
+        for rec, mcq, res, _, _ in stream_scored(
+                all_records, "perception_control", "phase1"):
             ok = res["category"] == "image_bias"
             w1.write({"model": mkey, "uid": rec.uid, "dataset": rec.dataset,
                       "language": rec.language, "chosen": res["chosen_letter"],
                       "category": res["category"], "validated": ok})
             if ok:
                 validated.append(rec)
-            if (i + 1) % 100 == 0:
+            done += 1
+            if done % 100 == 0:
                 w1.flush()
-                print(f"      {i+1}/{len(all_records)}  kept={len(validated)}",
+                print(f"      {done}/{len(all_records)}  kept={len(validated)}",
                       flush=True)
         w1.flush()
         print(f"  [P1] validated {len(validated)}/{len(all_records)}", flush=True)
@@ -271,13 +339,8 @@ def main():
         store: dict[str, dict] = {}
         for lang, recs in by_lang.items():
             acts, lensd, cats, uids, dsets, splits = [], [], [], [], [], []
-            for rec in recs:
-                try:
-                    res, hid, ld = score(rec, "inference", want_hidden=True,
-                                         want_lens=True)
-                except Exception as e:
-                    log_err(stage="phase2", model=mkey, uid=rec.uid, error=str(e))
-                    continue
+            for rec, mcq, res, hid, ld in stream_scored(
+                    recs, "inference", "phase2", want_hidden=True, want_lens=True):
                 sp = split_eval(rec.uid, cfg["eval_fraction"], seed)
                 w2.write({"model": mkey, "uid": rec.uid, "dataset": rec.dataset,
                           "language": lang, "chosen": res["chosen_letter"],
@@ -361,31 +424,34 @@ def main():
         # ── Phase 5: native alpha sweep (eval split) ─────────────────────────
         alphas = [float(a) for a in cfg["alpha_sweep"]]
         cap = cfg["eval_cap"]
-        best_alpha: dict[str, float] = {}      # coverage-constrained (reporting)
-        best_cr_alpha: dict[str, float] = {}   # max-CR alpha incl. sign (for transfer)
-        for lang, layer_vecs in vectors.items():
-            S = store[lang]
+        # Pre-build the eval batches ONCE per language (both conditions). They are
+        # reused across every alpha here and across every source vector in Phase 6
+        # — only the steering hook changes between passes, never the inputs.
+        eval_inf: dict[str, list] = {}    # lang -> inference batches
+        eval_perc: dict[str, list] = {}   # lang -> perception-control batches
+        for lang, S in store.items():
             ev = S["splits"] == "eval"
             ev_uids = list(S["uids"][ev])[:cap]
             recs_map = S["recs"]
-            conflict_recs = [recs_map[u] for u in ev_uids if u in recs_map]
-            # off-target = same items, perception condition (should stay image-faithful)
+            ev_recs = [recs_map[u] for u in ev_uids if u in recs_map]
+            eval_inf[lang] = build_batches(ev_recs, "inference")
+            eval_perc[lang] = build_batches(ev_recs, "perception_control")
+
+        best_alpha: dict[str, float] = {}      # coverage-constrained (reporting)
+        best_cr_alpha: dict[str, float] = {}   # max-CR alpha incl. sign (for transfer)
+        for lang, layer_vecs in vectors.items():
             results = []
             for a in alphas:
                 lv = layer_vecs if a != 0.0 else None
                 cr = vr = tr = n = 0
                 off_ok = off_n = 0
-                for rec in conflict_recs:
-                    try:
-                        res, _, _ = score(rec, "inference", layer_vecs=lv, alpha=a)
-                        m = sc.CATEGORY_TO_METRIC.get(res["category"], "IR")
-                        cr += (m == "CR"); vr += (m == "VR"); tr += (m == "TR"); n += 1
-                        ro, _, _ = score(rec, "perception_control", layer_vecs=lv,
-                                         alpha=a)
-                        off_ok += (ro["category"] == "image_bias"); off_n += 1
-                    except Exception as e:
-                        log_err(stage="phase5", model=mkey, uid=rec.uid,
-                                alpha=a, error=str(e))
+                for rec, mcq, res, _, _ in run_prebuilt(
+                        eval_inf[lang], "phase5", layer_vecs=lv, alpha=a):
+                    m = sc.CATEGORY_TO_METRIC.get(res["category"], "IR")
+                    cr += (m == "CR"); vr += (m == "VR"); tr += (m == "TR"); n += 1
+                for rec, mcq, ro, _, _ in run_prebuilt(
+                        eval_perc[lang], "phase5", layer_vecs=lv, alpha=a):
+                    off_ok += (ro["category"] == "image_bias"); off_n += 1
                 if n == 0:
                     continue
                 row = {"model": mkey, "language": lang, "alpha": a, "n": n,
@@ -424,27 +490,18 @@ def main():
             print(f"  [P6] all-pairs transfer ({len(vectors)} fit-langs), "
                   f"per-source alpha={ {l: best_cr_alpha.get(l, fallback_a) for l in vectors} }",
                   flush=True)
-            for tgt, S in store.items():
-                ev = S["splits"] == "eval"
-                ev_uids = list(S["uids"][ev])[:cap]
-                recs_map = S["recs"]
-                tgt_recs = [recs_map[u] for u in ev_uids if u in recs_map]
+            for tgt in store:
                 for fit_lang, fit_vecs in vectors.items():
                     a = best_cr_alpha.get(fit_lang) or fallback_a
                     cr = tr = n = 0
                     off_ok = off_n = 0
-                    for rec in tgt_recs:
-                        try:
-                            res, _, _ = score(rec, "inference",
-                                              layer_vecs=fit_vecs, alpha=a)
-                            m = sc.CATEGORY_TO_METRIC.get(res["category"], "IR")
-                            cr += (m == "CR"); tr += (m == "TR"); n += 1
-                            ro, _, _ = score(rec, "perception_control",
-                                             layer_vecs=fit_vecs, alpha=a)
-                            off_ok += (ro["category"] == "image_bias"); off_n += 1
-                        except Exception as e:
-                            log_err(stage="phase6", model=mkey, uid=rec.uid,
-                                    error=str(e))
+                    for rec, mcq, res, _, _ in run_prebuilt(
+                            eval_inf[tgt], "phase6", layer_vecs=fit_vecs, alpha=a):
+                        m = sc.CATEGORY_TO_METRIC.get(res["category"], "IR")
+                        cr += (m == "CR"); tr += (m == "TR"); n += 1
+                    for rec, mcq, ro, _, _ in run_prebuilt(
+                            eval_perc[tgt], "phase6", layer_vecs=fit_vecs, alpha=a):
+                        off_ok += (ro["category"] == "image_bias"); off_n += 1
                     if n == 0:
                         continue
                     t_alpha = a

@@ -48,6 +48,10 @@ min_class: 5            # min items per class to derive a vector for a language
 # Cap eval items per language in the α-sweep / transfer phases (speed).
 eval_cap: 80
 
+# Forward-pass batch size for all phases. Larger = higher GPU throughput; lower
+# if you hit OOM (Phase 2 also holds output_hidden_states for the batch).
+batch_size: 8
+
 dtype: bfloat16         # bfloat16 | float16 | float32
 device_map: auto
 attn_impl: sdpa         # eager | sdpa | flash_attention_2

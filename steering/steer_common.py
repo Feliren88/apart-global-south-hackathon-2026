@@ -145,22 +145,47 @@ class LensTools:
 
     def diff_trace(self, hidden_states) -> np.ndarray:
         """hidden_states: tuple over (L+1) of [B, seq, hidden]; read the last
-        token of row 0. Returns [L+1] of  logit(D) - max logit(A/B/C)."""
-        out = []
+        token of row 0. Returns [L+1] of  logit(D) - max logit(A/B/C).
+
+        Vectorised: stack the L+1 last-token vectors and project them in a single
+        matmul (one GPU->CPU copy), instead of an L+1-long Python loop.
+        """
         with torch.no_grad():
-            w = self.head.weight  # [vocab, hidden]
-            for h in hidden_states:
-                vec = h[0, -1, :].to(w.dtype)
-                if self.norm is not None:
-                    try:
-                        vec = self.norm(vec)
-                    except Exception:
-                        pass
-                logits = torch.matmul(w, vec).float()   # [vocab]
-                d = max(float(logits[i]) for i in self.abstain_ids)
-                a = max(float(logits[i]) for i in self.answer_ids)
-                out.append(d - a)
-        return np.asarray(out, dtype=np.float32)
+            w = self.head.weight                                  # [vocab, hidden]
+            hs = torch.stack([h[0, -1, :] for h in hidden_states],
+                             dim=0).to(w.dtype)                   # [L+1, hidden]
+            if self.norm is not None:
+                try:
+                    hs = self.norm(hs)
+                except Exception:
+                    pass
+            logits = torch.matmul(hs, w.t()).float()             # [L+1, vocab]
+            d = logits[:, self.abstain_ids].amax(dim=1)          # [L+1]
+            a = logits[:, self.answer_ids].amax(dim=1)           # [L+1]
+            return (d - a).cpu().numpy().astype(np.float32)
+
+    def diff_trace_batch(self, last: torch.Tensor) -> np.ndarray:
+        """Batched logit-lens. `last` is [L+1, B, hidden] (per-row last-token
+        hidden at every layer). Returns [B, L+1] of logit(D) - max logit(A/B/C).
+
+        Projects only onto the answer/abstain rows of the unembedding (a few
+        token ids), not the full vocab — far cheaper than a [vocab, hidden] matmul.
+        """
+        with torch.no_grad():
+            w = self.head.weight                                 # [vocab, hidden]
+            ids = list(self.abstain_ids) + list(self.answer_ids)
+            w_sub = w[ids]                                        # [k, hidden]
+            hs = last.to(w.dtype)
+            if self.norm is not None:
+                try:
+                    hs = self.norm(hs)
+                except Exception:
+                    pass
+            sub = torch.matmul(hs, w_sub.t()).float()            # [L+1, B, k]
+            na = len(self.abstain_ids)
+            d = sub[..., :na].amax(dim=-1)                       # [L+1, B]
+            a = sub[..., na:].amax(dim=-1)                       # [L+1, B]
+            return (d - a).permute(1, 0).cpu().numpy().astype(np.float32)
 
 
 # ── Scoring (baseline + under steering) ──────────────────────────────────────
@@ -186,9 +211,9 @@ def forward_score(lm, inputs, letter_ids, want_hidden=False, lens: "LensTools|No
     hidden = None
     if want_hidden and getattr(out, "hidden_states", None):
         try:
-            hidden = np.stack(
-                [h[0, -1, :].float().cpu().numpy() for h in out.hidden_states],
-                axis=0).astype(np.float16)
+            # Stack on-device then a single GPU->CPU copy (vs one copy per layer).
+            hidden = torch.stack([h[0, -1, :] for h in out.hidden_states], dim=0) \
+                .to(torch.float16).cpu().numpy()
         except Exception:
             hidden = None
 
@@ -200,6 +225,71 @@ def forward_score(lm, inputs, letter_ids, want_hidden=False, lens: "LensTools|No
             lens_diff = None
 
     return chosen, {L: round(v, 3) for L, v in scores.items()}, hidden, lens_diff
+
+
+def forward_score_batch(lm, inputs, letter_ids, want_hidden=False,
+                        lens: "LensTools|None" = None):
+    """Batched counterpart of forward_score over a RIGHT-padded batch.
+
+    `inputs` is the dict from `mdl.build_inputs_batch` (right padded, so each
+    row's last real token is at `attention_mask.sum(dim=1) - 1`). A single
+    forward scores the whole batch; per-row letter logits, last-token hidden
+    states and the logit-lens trace are gathered with one GPU->CPU copy each.
+
+    Returns parallel lists of length B:
+        chosen[b]    : argmax letter over A/B/C/D (or None)
+        scores[b]    : {letter: rounded logit margin}
+        hidden[b]    : [L+1, hidden] float16 per-layer last-token act, or None
+        lens_diff[b] : [L+1] abstain-vs-answer trace, or None
+    """
+    device = next(lm.model.parameters()).device
+    inputs = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+    need_hs = want_hidden or (lens is not None)
+
+    am = inputs.get("attention_mask")
+    with torch.no_grad():
+        out = lm.model(**inputs, output_hidden_states=need_hs, use_cache=False)
+
+    logits_all = out.logits                                   # [B, seq, vocab]
+    B = logits_all.shape[0]
+    if am is not None:
+        last_idx = am.long().sum(dim=1) - 1                   # [B] last real token
+    else:
+        last_idx = torch.full((B,), logits_all.shape[1] - 1, device=device)
+    bidx = torch.arange(B, device=device)
+    logits = logits_all[bidx, last_idx, :].float()           # [B, vocab]
+
+    # Per-letter score = max logit over that letter's token-id variants.
+    letters = [L for L, ids in letter_ids.items() if ids]
+    per_letter = torch.stack(
+        [logits[:, letter_ids[L]].amax(dim=1) for L in letters], dim=1)  # [B, nL]
+    best = per_letter.argmax(dim=1).cpu().tolist()
+    pl = per_letter.cpu()
+    chosen = [letters[b] for b in best] if letters else [None] * B
+    scores = [{L: round(float(pl[i, j]), 3) for j, L in enumerate(letters)}
+              for i in range(B)]
+
+    hidden = [None] * B
+    lens_diff = [None] * B
+    if need_hs and getattr(out, "hidden_states", None):
+        # Gather only the per-row last token from each layer (avoids stacking the
+        # full [L+1, B, seq, hidden] residual stream).
+        last = torch.stack([h[bidx, last_idx, :] for h in out.hidden_states],
+                           dim=0)                              # [L+1, B, hidden]
+        if want_hidden:
+            try:
+                harr = last.permute(1, 0, 2).to(torch.float16).cpu().numpy()
+                hidden = [harr[i] for i in range(B)]
+            except Exception:
+                hidden = [None] * B
+        if lens is not None and lens.usable:
+            try:
+                larr = lens.diff_trace_batch(last)            # [B, L+1]
+                lens_diff = [larr[i] for i in range(B)]
+            except Exception:
+                lens_diff = [None] * B
+
+    return chosen, scores, hidden, lens_diff
 
 
 # ── Activation steering ──────────────────────────────────────────────────────

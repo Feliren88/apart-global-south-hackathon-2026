@@ -74,7 +74,9 @@ DATASET_REGISTRY: dict[str, dict[str, Any]] = {
         "hf_id": "Anvesh-Lankala/multilingual-crossmodal-conflict-3D_Objects",
         "split": "train",
         "cols": {
-            "image": "original_image",
+            # Upstream renamed "original_image" -> "image" (now RGBA, converted
+            # to RGB on load); accept either so older snapshots still resolve.
+            "image": ["original_image", "image"],
             "original_caption": "Original_Caption",
             "cf_caption": "Counterfactual_Caption",
             "question": "original_question",

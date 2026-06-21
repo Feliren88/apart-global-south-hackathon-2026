@@ -10,5 +10,7 @@ inference/results/
 inference/results_smoke/
 steering/steering_smoke*/
 steering/steering_b8/
+steering/steering_b1/
+steering/steering_results/
 steering/*.log
 steering/__pycache__/

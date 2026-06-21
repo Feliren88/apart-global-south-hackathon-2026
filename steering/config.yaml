@@ -19,7 +19,19 @@ languages: all
 source_language: english
 
 # Models to steer (run sequentially, one loaded at a time). Keys -> ../inference/models.py
+# These are the models that loaded successfully in the inference benchmarks
+# (../inference/result_logit_19models + ../inference/results); models that
+# errored at load_model there (missing deps / unsupported arch / gated
+# aya-vision-8b) are intentionally excluded.
 models:
+  - internvl3-2b
+  - internvl3-8b
+  - llava-onevision-7b
+  - glm-4.1v-9b-thinking
+  - granite-vision-3.3-2b
+  - sea-lion-v4-8b-vl
+  - qwen2.5-vl-7b
+  - qwen3-vl-8b
   - qwen2.5-vl-3b
 
 # Cap rows per (dataset, language) group at load time. null / -1 = all rows.

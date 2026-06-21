@@ -3,8 +3,8 @@
 A systematic framework for evaluating **multilingual counterfactual robustness** in Vision-Language Models (VLMs). Built for the [APART Global South Hackathon 2026](https://apartresearch.com).
 
 ```
-Dataset Pipeline     →    VLM Benchmark    →    Analysis Toolkit
-(generate + push)         (inference engine)      (bias measurement + mech interp)
+Dataset Pipeline     →    VLM Benchmark    →    Analysis Toolkit     →    Steering
+(generate + push)         (inference engine)      (bias + mech interp)     (cross-lingual intervention)
 ```
 
 ---
@@ -27,18 +27,25 @@ Current VLM safety evaluations are predominantly **English-only** and treat mode
 .
 ├── generate_dataset.py              # MCQ generator from COCO-Counterfactual
 ├── translate_and_push.py            # Claude-powered multilingual translation + HF push
-├── all_rows_checkpoint.json         # Final 750-row dataset (gitignored; on HF)
 ├── requirements.txt                 # Dataset pipeline deps
 ├── inference/
 │   ├── vlm_bench.py                 # Benchmark orchestration engine
-│   ├── models.py                    # VLM registry + unified loader (20+ models)
+│   ├── models.py                    # VLM registry + unified loader (27 models)
 │   ├── datasets_adapter.py          # Unified record schema across 4 datasets
 │   ├── classify.py                  # MCQ prompt builder + answer parser + classifier
 │   ├── analyze.py                   # Post-hoc analysis + charts + probing
 │   ├── config.yaml                  # YAML configuration
 │   ├── run.sh                       # Shell runner with env-var overrides
-│   ├── requirements.txt             # Inference + analysis deps
-│   └── prompt.md                    # Original design brief
+│   ├── run_all_models.sh            # Sweep all 23 non-gated models
+│   ├── run_19models_logit.sh        # Fast logit sweep over batch
+│   └── requirements.txt             # Inference + analysis deps
+├── steering/
+│   ├── run_steering.py              # 6-phase steering pipeline
+│   ├── steer_common.py              # Steering hook + scoring utilities
+│   ├── analyze_steering.py          # Steering analysis + figures
+│   ├── config.yaml                  # Steering configuration
+│   ├── run.sh                       # Shell launcher
+│   └── README.md                    # Full steering documentation
 └── README.md
 ```
 
@@ -103,21 +110,22 @@ Current VLM safety evaluations are predominantly **English-only** and treat mode
 ### Architecture
 
 ```
-vlm_bench.py
+vlm_bench.py              ← engine: model loop, (batched) scoring, hidden-state capture
 │
 ├─ datasets_adapter.py    → loads 4 counterfactual datasets into unified Record
 │                            (pendulum, feliren, remote_sensing, objects3d)
 │
-├─ models.py              → MODEL_REGISTRY (20+ VLMs) + unified loader
+├─ models.py              → MODEL_REGISTRY (27 VLMs) + unified loader + letter-token ids
 │                            using AutoModelForImageTextToText + AutoProcessor
 │
 ├─ classify.py            → eval CONDITIONS (inference / perception_control)
 │                            * builds shuffled-option MCQ from Record
-│                            * parses free-form VLM output → answer letter
+│                            * logit-scoring: single forward pass, argmax over A/B/C/D
+│                            * generate: free-form text → answer letter via 6-strategy cascade
 │                            * classifies → {image_bias, text_bias, distractor,
 │                                            conflict_abstain, other}
 │
-└─ run.sh                 → env-var-driven launcher
+└─ run.sh                 → env-var-driven launcher (also: run_all_models.sh, run_19models_logit.sh)
 ```
 
 ### Evaluation Conditions
@@ -173,7 +181,7 @@ The parser maps free-form VLM output to one of 5 categories through 6 increasing
 
 ### Model Registry
 
-The framework supports 20+ VLMs from 10+ organisations:
+The framework supports 27 VLMs from 10+ organisations (23 non-gated, 4 gated):
 
 ```python
 MODEL_REGISTRY = {
@@ -246,36 +254,40 @@ Models use **`transformers>=5`** with the unified `AutoModelForImageTextToText` 
 
 ### Running the Benchmark
 
+Default scoring is **logit-based** (single forward pass, argmax over answer tokens — ~8× faster than generation). Batched scoring (`batch_size=8`) is on by default.
+
 ```bash
 cd inference
 
 # Basic run (config.yaml defaults)
 ./run.sh
 
-# One model, two datasets, all languages
+# One-command sweeps
+nohup bash run_19models_logit.sh > run.log 2>&1 &   # fast logit sweep over 19 models
+nohup bash run_all_models.sh &                       # all 23 non-gated models
+
+# Single run with env overrides
 MODELS="qwen2.5-vl-7b" DATASETS="feliren pendulum" ./run.sh
+MAX_PER_GROUP=5 SMOKE=20 MODELS="qwen2.5-vl-7b" ./run.sh   # quick smoke test
 
-# Quick smoke test: 5 samples per group, 1 model
-MAX_PER_GROUP=5 SMOKE=20 MODELS="qwen2.5-vl-7b" ./run.sh
-
-# Disable hidden state capture (saves disk space)
-SAVE_HIDDEN=0 ./run.sh
-
-# Force re-download datasets (pick up upstream changes)
-FORCE_REDOWNLOAD=1 ./run.sh
-
-# Gated model
-HF_TOKEN=hf_xxx MODELS="aya-vision-8b" ./run.sh
+# Scoring and batching
+SCORING="generate" MAX_NEW_TOKENS=24 ./run.sh         # legacy free-text method
+BATCH_SIZE=16 ./run.sh                                # larger batches (big GPU)
+SAVE_HIDDEN=0 ./run.sh                                # disable activation capture
+HF_TOKEN=hf_xxx MODELS="aya-vision-8b" ./run.sh       # gated model
+FORCE_REDOWNLOAD=1 ./run.sh                           # pick up upstream dataset changes
 ```
 
 Or directly:
 
 ```bash
 python vlm_bench.py --config config.yaml \
-    --models qwen2.5-vl-7b internvl3-8b \
+    --models qwen2.5-vl-7b qwen3-vl-8b \
     --datasets feliren pendulum \
     --languages english hindi urdu telugu \
-    --max_samples_per_group 25
+    --scoring logit --batch_size 8 \
+    --max_samples_per_group -1 \
+    --output_dir results
 ```
 
 ### Outputs
@@ -345,7 +357,48 @@ override_share = override_gap / perception_ceiling
 
 ---
 
-## Part IV: Extending the Framework
+## Part IV: Cross-Lingual Contrastive Steering
+
+The [`steering/`](steering/README.md) package goes beyond measurement to **intervention**: it extracts the model's internal **abstain-vs-assert direction** from the residual stream and steers inference-time behaviour, then measures how well that honesty direction **transfers across languages**.
+
+### 6-Phase Pipeline (`run_steering.py`)
+
+| Phase | Name | What it does |
+|-------|------|--------------|
+| **1** | Perception Control | Score each item image-only; keep only correctly-perceived items |
+| **2** | Conflict Profiling | Re-score with captions + cache residual-stream activations |
+| **3** | Target-Layer Localization | Select decoder-depth band for steering |
+| **4** | Contrastive Vector | Per language: `normalize(μ_abstain − μ_assert)` from fit split |
+| **5** | Inference-Time Steering | Add `α·v̂` via forward hooks; sweep α for max abstention with minimal off-target cost |
+| **6** | Cross-Lingual Transfer | Apply every fit-language vector to every eval language (all-pairs matrix) |
+
+### Key Outputs
+
+| Artifact | Description |
+|----------|-------------|
+| `phase2_conflict.jsonl` | Per-item conflict answers + activations |
+| `vectors/<model>.npz` | Per-language steering vectors |
+| `phase5_alpha_sweep.jsonl` | Native steering: CR/VR/TR vs α |
+| `phase6_transfer.jsonl` | All-pairs source→target steered conflict rates |
+| `analysis/table1_conflict_profile.csv` | Models × Languages: conflict resolution profile |
+| `analysis/table2_transfer_matrix_<model>.csv` | Source-vector × target-eval transfer matrix |
+
+### Quick Start
+
+```bash
+cd steering
+./run.sh   # uses config.yaml defaults
+
+# Smoke test
+MODELS="qwen2.5-vl-3b" DATASETS="feliren" LANGUAGES="english hindi telugu" \
+  MAX_PER_GROUP=20 EVAL_CAP=30 OUTPUT_DIR=steering_smoke ./run.sh
+```
+
+See [`steering/README.md`](steering/README.md) for full documentation.
+
+---
+
+## Part V: Extending the Framework
 
 ### Adding a New Dataset
 

@@ -33,15 +33,27 @@ models:
 max_samples_per_group: 25
 shuffle_seed: 1234
 
-# Generation
+# Answer scoring:
+#   logit    : ONE forward pass per item; read the A/B/C/D answer-token logits at
+#              the final position, argmax = answer. No autoregressive decoding, so
+#              this is ~2-4x faster than generation. Hidden states are captured
+#              from the same forward pass (identical mech-interp semantics).
+#   generate : legacy free-text generation + regex parsing (slower; keeps raw text).
+scoring: logit
+
+# Generation (only used when scoring: generate)
 max_new_tokens: 24
 dtype: bfloat16            # bfloat16 | float16 | float32
 device_map: auto
-attn_impl: null            # e.g. flash_attention_2 | sdpa | eager
+attn_impl: sdpa            # eager | sdpa | flash_attention_2  (sdpa = fast default)
 
-# Mechanistic interpretability — last-token hidden state per layer
+# Mechanistic interpretability — last-token hidden state per layer.
+# Capture is STRATIFIED: up to `max_hidden_per_cell` samples per
+# (dataset x language) cell within each (model, condition), so the residual
+# stream can be probed per-dataset and per-language (not just per-model).
 save_hidden_states: true
-max_hidden_state_samples: 150   # cap npz rows per model (size control)
+max_hidden_per_cell: 20          # balanced quota per (dataset, language) cell
+max_hidden_state_samples: 2000   # global safety ceiling per (model, condition)
 
 # HF auth: do NOT hardcode the token here. Export it instead:
 #   export HF_TOKEN=hf_...     (vlm_bench.py reads it via os.environ)

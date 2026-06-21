@@ -44,11 +44,13 @@ DEFAULT_CONFIG = {
     "max_samples_per_group": 25,
     "shuffle_seed": 1234,
     "max_new_tokens": 24,
+    "scoring": "logit",          # "logit" (1 forward pass, fast) | "generate"
     "dtype": "bfloat16",
     "device_map": "auto",
-    "attn_impl": None,
+    "attn_impl": "sdpa",
     "save_hidden_states": True,
-    "max_hidden_state_samples": 150,
+    "max_hidden_per_cell": 20,          # stratified: per (dataset, language) cell
+    "max_hidden_state_samples": 2000,   # global safety ceiling per (model, condition)
     "force_redownload": False,
     "hf_token": None,
     "cache_dir": None,
@@ -106,6 +108,43 @@ def generate_answer(lm, inputs, max_new_tokens, want_hidden):
     return text, hidden_vec
 
 
+def score_answer(lm, inputs, letter_ids, want_hidden):
+    """Logit-scoring fast path: a SINGLE forward pass over the prompt, then read
+    the answer-letter (A/B/C/D) logits at the final position; argmax is the answer.
+
+    No autoregressive decoding at all — this is the dominant speedup. The
+    last-prompt-token hidden states fall out of the very same forward pass, so
+    mech-interp capture is unchanged (and identical semantics to generate()'s
+    prompt-pass hidden states).
+    """
+    import torch
+
+    device = next(lm.model.parameters()).device
+    inputs = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+    with torch.no_grad():
+        out = lm.model(**inputs, output_hidden_states=want_hidden, use_cache=False)
+
+    logits = out.logits[0, -1, :].float()  # next-token logits at last prompt pos
+    scores = {}
+    for L, ids in letter_ids.items():
+        if ids:
+            scores[L] = max(float(logits[i]) for i in ids)
+    chosen = max(scores, key=scores.get) if scores else None
+
+    hidden_vec = None
+    if want_hidden and getattr(out, "hidden_states", None):
+        try:
+            # forward() returns hidden_states as a tuple over layers directly,
+            # each [batch, seq, hidden]; take the last prompt token per layer.
+            per_layer = [h[0, -1, :].float().cpu().numpy() for h in out.hidden_states]
+            hidden_vec = np.stack(per_layer, axis=0).astype(np.float16)
+        except Exception:
+            hidden_vec = None
+    # Round scores for compact, human-readable logging.
+    scores = {L: round(v, 3) for L, v in scores.items()}
+    return chosen, scores, hidden_vec
+
+
 def run():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=None)
@@ -116,8 +155,11 @@ def run():
     ap.add_argument("--conditions", nargs="*", default=None)
     ap.add_argument("--max_samples_per_group", type=int, default=None)
     ap.add_argument("--max_new_tokens", type=int, default=None)
+    ap.add_argument("--scoring", choices=["logit", "generate"], default=None)
+    ap.add_argument("--attn_impl", default=None)
     ap.add_argument("--dtype", default=None)
     ap.add_argument("--no_hidden_states", action="store_true")
+    ap.add_argument("--max_hidden_per_cell", type=int, default=None)
     ap.add_argument("--max_hidden_state_samples", type=int, default=None)
     ap.add_argument("--force_redownload", action="store_true")
     ap.add_argument("--hf_token", default=None)
@@ -134,8 +176,12 @@ def run():
     if args.max_samples_per_group is not None:
         cfg["max_samples_per_group"] = args.max_samples_per_group
     if args.max_new_tokens is not None: cfg["max_new_tokens"] = args.max_new_tokens
+    if args.scoring: cfg["scoring"] = args.scoring
+    if args.attn_impl: cfg["attn_impl"] = args.attn_impl
     if args.dtype: cfg["dtype"] = args.dtype
     if args.no_hidden_states: cfg["save_hidden_states"] = False
+    if args.max_hidden_per_cell is not None:
+        cfg["max_hidden_per_cell"] = args.max_hidden_per_cell
     if args.max_hidden_state_samples is not None:
         cfg["max_hidden_state_samples"] = args.max_hidden_state_samples
     if args.force_redownload: cfg["force_redownload"] = True
@@ -211,42 +257,66 @@ def run():
             continue
         print(f"  loaded in {time.time()-t0:.1f}s, layers={lm.num_layers()}", flush=True)
 
+        scoring = cfg.get("scoring", "logit")
+        letter_ids = None
+        if scoring == "logit":
+            letter_ids = mdl.letter_token_ids(lm)
+            print(f"  scoring=logit  letter token ids: "
+                  f"{ {L: v for L, v in letter_ids.items()} }", flush=True)
+        else:
+            print(f"  scoring=generate  max_new_tokens={cfg['max_new_tokens']}",
+                  flush=True)
+
         records = all_records
         if args.limit_smoke:
             records = all_records[: args.limit_smoke]
 
         conditions = cfg["conditions"]
-        # per-condition hidden-state accumulators
-        hs = {c: {"arrays": [], "meta": [], "n": 0} for c in conditions}
+        # Per-condition hidden-state accumulators. Capture is STRATIFIED: up to
+        # `max_hidden_per_cell` samples per (dataset, language) cell, bounded by a
+        # global safety ceiling `max_hidden_state_samples`. This guarantees every
+        # dataset x language cell is represented so the residual-stream activations
+        # can be probed per-dataset and per-language, not just per-model.
+        hs = {c: {"arrays": [], "meta": [], "cells": {}} for c in conditions}
+        per_cell = cfg.get("max_hidden_per_cell", 20)
+        global_cap = cfg.get("max_hidden_state_samples", 10**9) or 10**9
         done = 0
         total = len(records) * len(conditions)
         t_model = time.time()
         for rec in records:
             for cond in conditions:
                 mcq = clf.build_mcq(rec, cfg["shuffle_seed"], cond)
+                cell = (rec.dataset, rec.language)
                 try:
                     inputs = mdl.build_inputs(lm, rec.image, mcq["prompt"])
                     want_hidden = (
                         cfg["save_hidden_states"]
-                        and hs[cond]["n"] < cfg["max_hidden_state_samples"]
+                        and hs[cond]["cells"].get(cell, 0) < per_cell
+                        and len(hs[cond]["arrays"]) < global_cap
                     )
                     t_g = time.time()
-                    raw, hidden_vec = generate_answer(
-                        lm, inputs, cfg["max_new_tokens"], want_hidden
-                    )
+                    if scoring == "logit":
+                        raw, letter_scores, hidden_vec = score_answer(
+                            lm, inputs, letter_ids, want_hidden
+                        )
+                        res = clf.classify_letter(raw, mcq)
+                    else:
+                        raw, hidden_vec = generate_answer(
+                            lm, inputs, cfg["max_new_tokens"], want_hidden
+                        )
+                        res = clf.classify(raw, mcq)
+                        letter_scores = None
                     dt = time.time() - t_g
                 except Exception as e:
                     log_err(stage="inference", model=mkey, uid=rec.uid,
                             condition=cond, error=str(e), tb=traceback.format_exc())
                     continue
-
-                res = clf.classify(raw, mcq)
                 if hidden_vec is not None:
                     hs[cond]["arrays"].append(hidden_vec)
                     hs[cond]["meta"].append(
                         {"uid": rec.uid, "category": res["category"],
                          "dataset": rec.dataset, "language": rec.language})
-                    hs[cond]["n"] += 1
+                    hs[cond]["cells"][cell] = hs[cond]["cells"].get(cell, 0) + 1
 
                 row = {
                     "run_id": run_id,
@@ -270,6 +340,8 @@ def run():
                     "chosen_text": res["chosen_text"],
                     "parse_method": res["parse_method"],
                     "category": res["category"],
+                    "scoring": scoring,
+                    "letter_scores": letter_scores,
                     "latency_s": round(dt, 3),
                     "has_hidden_state": hidden_vec is not None,
                     "max_new_tokens": cfg["max_new_tokens"],

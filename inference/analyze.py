@@ -193,39 +193,56 @@ def layerwise_probe(out_dir, fig_dir, ana_dir):
     hs_dir = os.path.join(out_dir, "hidden_states")
     if not os.path.isdir(hs_dir):
         return
+
+    def probe_curve(X_all, y):
+        """CV accuracy of an image- vs text-following linear probe at each layer."""
+        accs = []
+        for L in range(X_all.shape[1]):
+            clf = make_pipeline(StandardScaler(),
+                                LogisticRegression(max_iter=2000, C=0.5))
+            try:
+                cv = max(2, min(5, int(np.bincount(y).min())))
+                acc = cross_val_score(clf, X_all[:, L, :], y, cv=cv).mean()
+            except Exception:
+                acc = np.nan
+            accs.append(acc)
+        return accs
+
+    def eval_subset(rows, model, condition, subset, acts, cats):
+        """Append per-layer probe rows for one slice; return the accs (or None)."""
+        mask = np.isin(cats, ["image_bias", "text_bias"])
+        if mask.sum() < 12:
+            return None
+        y = (cats[mask] == "text_bias").astype(int)
+        if len(np.unique(y)) < 2 or np.bincount(y).min() < 3:
+            return None       # need both classes with enough samples for CV
+        accs = probe_curve(acts[mask], y)
+        for L, a in enumerate(accs):
+            rows.append({"model": model, "condition": condition, "subset": subset,
+                         "layer": L, "probe_acc": a, "n": int(mask.sum())})
+        return accs
+
     rows = []
     for fn in sorted(os.listdir(hs_dir)):
         if not fn.endswith(".npz"):
             continue
-        model = fn[:-4]
+        model = fn[:-4]                                   # "<model>__<condition>"
+        condition = model.split("__")[-1] if "__" in model else ""
         d = np.load(os.path.join(hs_dir, fn), allow_pickle=True)
         acts = d["activations"].astype(np.float32)        # [n, layers, hidden]
         cats = d["categories"].astype(str)
-        # Probe the two main competing behaviours.
-        mask = np.isin(cats, ["image_bias", "text_bias"])
-        if mask.sum() < 12:
+        dsets = d["datasets"].astype(str) if "datasets" in d else np.array([""] * len(cats))
+        langs = d["languages"].astype(str) if "languages" in d else np.array([""] * len(cats))
+
+        # (1) whole-model probe (subset = "all") + figure + PCA
+        accs = eval_subset(rows, model, condition, "all", acts, cats)
+        if accs is None:
             continue
-        X_all, y = acts[mask], (cats[mask] == "text_bias").astype(int)
-        if len(np.unique(y)) < 2:
-            continue
-        n_layers = X_all.shape[1]
-        accs = []
-        for L in range(n_layers):
-            X = X_all[:, L, :]
-            clf = make_pipeline(StandardScaler(),
-                                LogisticRegression(max_iter=2000, C=0.5))
-            try:
-                cv = min(5, np.bincount(y).min())
-                acc = cross_val_score(clf, X, y, cv=max(2, cv)).mean()
-            except Exception:
-                acc = np.nan
-            accs.append(acc)
-            rows.append({"model": model, "layer": L, "probe_acc": acc,
-                         "n": int(mask.sum())})
-        # layer-wise probe curve
+        n_layers = len(accs)
+        y_all = (cats[np.isin(cats, ["image_bias", "text_bias"])] == "text_bias").astype(int)
         fig, ax = plt.subplots(figsize=(7, 4))
         ax.plot(range(n_layers), accs, marker="o", color="#264653")
-        ax.axhline(max(np.bincount(y)) / len(y), ls="--", color="grey",
+        ax.axhline(max(np.bincount(y_all)) / len(y_all), ls="--", color="grey",
                    label="majority baseline")
         ax.set_xlabel("layer (residual stream)")
         ax.set_ylabel("CV accuracy")
@@ -235,6 +252,18 @@ def layerwise_probe(out_dir, fig_dir, ana_dir):
         plt.tight_layout()
         plt.savefig(os.path.join(fig_dir, f"probe_layerwise_{model}.png"), dpi=140)
         plt.close()
+
+        # (2) per-dataset and per-language probes (stratified capture makes this valid)
+        for dval in sorted(set(dsets)):
+            if dval:
+                m = dsets == dval
+                eval_subset(rows, model, condition, f"dataset:{dval}",
+                            acts[m], cats[m])
+        for lval in sorted(set(langs)):
+            if lval:
+                m = langs == lval
+                eval_subset(rows, model, condition, f"language:{lval}",
+                            acts[m], cats[m])
 
         # PCA of last layer colored by category (all 4 cats)
         last = acts[:, -1, :]
@@ -326,13 +355,37 @@ def write_report(df, out_dir, ana_dir, full_df=None):
     probe_csv = os.path.join(ana_dir, "probe_scores.csv")
     if os.path.exists(probe_csv):
         pr = pd.read_csv(probe_csv)
-        best = pr.loc[pr.groupby("model")["probe_acc"].idxmax()]
         lines.append("## Mechanistic interpretability\n")
         lines.append("Peak linear decodability of image- vs text-following from "
-                     "residual-stream activations (logistic probe, CV accuracy):\n")
-        lines.append(best[["model", "layer", "probe_acc", "n"]].round(3)
-                     .to_markdown(index=False))
-        lines.append("")
+                     "residual-stream activations (logistic probe, CV accuracy). "
+                     "Capture is stratified per (dataset, language) cell, so probes "
+                     "are valid per-dataset and per-language as well as per-model.\n")
+        whole = pr[pr["subset"] == "all"] if "subset" in pr.columns else pr
+        if not whole.empty:
+            best = whole.loc[whole.groupby("model")["probe_acc"].idxmax()]
+            lines.append("### Peak decodability per (model, condition)\n")
+            cols = [c for c in ["model", "layer", "probe_acc", "n"] if c in best]
+            lines.append(best[cols].round(3).to_markdown(index=False))
+            lines.append("")
+        if "subset" in pr.columns:
+            lang = pr[pr["subset"].str.startswith("language:")].copy()
+            if not lang.empty:
+                lang["language"] = lang["subset"].str.replace("language:", "", regex=False)
+                peak = lang.groupby("language")["probe_acc"].max().round(3) \
+                           .sort_values(ascending=False)
+                lines.append("### Peak decodability per language "
+                             "(max across models/layers)\n")
+                lines.append(peak.to_frame("peak_probe_acc").to_markdown())
+                lines.append("")
+            dset = pr[pr["subset"].str.startswith("dataset:")].copy()
+            if not dset.empty:
+                dset["dataset"] = dset["subset"].str.replace("dataset:", "", regex=False)
+                peak = dset.groupby("dataset")["probe_acc"].max().round(3) \
+                           .sort_values(ascending=False)
+                lines.append("### Peak decodability per dataset "
+                             "(max across models/layers)\n")
+                lines.append(peak.to_frame("peak_probe_acc").to_markdown())
+                lines.append("")
 
     with open(os.path.join(ana_dir, "summary_report.md"), "w") as f:
         f.write("\n".join(lines))

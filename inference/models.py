@@ -188,6 +188,35 @@ def build_inputs(lm: LoadedModel, image: Any, prompt: str):
         return inputs
 
 
+def get_tokenizer(lm: LoadedModel):
+    """Return the underlying text tokenizer for a VLM processor."""
+    tok = getattr(lm.processor, "tokenizer", None)
+    return tok if tok is not None else lm.processor
+
+
+def letter_token_ids(lm: LoadedModel, letters=("A", "B", "C", "D")) -> dict[str, list[int]]:
+    """Map each answer letter to the set of first-token ids that could realize it.
+
+    Tokenizers encode "A", " A", "a", " a" differently, and which variant a model
+    emits as its first answer token depends on the chat template. We collect the
+    first-token id of every variant so logit-scoring can take the max logit over
+    all plausible realizations of each letter (robust across all model families).
+    """
+    tok = get_tokenizer(lm)
+    out: dict[str, list[int]] = {}
+    for L in letters:
+        ids: set[int] = set()
+        for variant in (L, " " + L, L.lower(), " " + L.lower()):
+            try:
+                enc = tok.encode(variant, add_special_tokens=False)
+            except TypeError:
+                enc = tok.encode(variant)
+            if enc:
+                ids.add(int(enc[0]))
+        out[L] = sorted(ids)
+    return out
+
+
 def free_model(lm: LoadedModel) -> None:
     import gc
 

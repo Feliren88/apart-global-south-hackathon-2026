@@ -41,20 +41,20 @@ PROMPT_INFERENCE = (
     "Caption: {caption}\n"
     "Question: {question}\n\n"
     "Options:\n{options}\n\n"
-    "Based on the given input image and caption, answer the question with one of "
-    "the four choices of the MCQ provided. The output must be exactly one of the "
-    "options. Do not explain or output anything further.\n"
+    "Based on the given input image and caption, answer the question by choosing "
+    "one of the four options. Respond with only the letter (A, B, C, or D) of your "
+    "chosen option. Do not explain or output anything further.\n"
     "Note: your visual input may conflict with the text caption. If the caption "
     "conflicts with what you actually see in the image, prefer the abstention "
-    "option \"{abstain}\"."
+    "option D (\"{abstain}\")."
 )
 
 PROMPT_PERCEPTION = (
     "Question: {question}\n\n"
     "Options:\n{options}\n\n"
-    "Based on the given input image, answer the question with one of the four "
-    "choices of the MCQ provided. The output must be exactly one of the options. "
-    "Do not explain or output anything further."
+    "Based on the given input image, answer the question by choosing one of the "
+    "four options. Respond with only the letter (A, B, C, or D) of your chosen "
+    "option. Do not explain or output anything further."
 )
 
 PROMPT_TEMPLATES = {
@@ -167,4 +167,22 @@ def classify(raw: str, mcq: dict) -> dict:
         "parse_method": method,
         "category": category,
         "chosen_text": chosen_text,
+    }
+
+
+def classify_letter(letter: str | None, mcq: dict,
+                    method: str = "logit_argmax") -> dict:
+    """Classify a letter chosen directly from token logits (no free-text parse).
+
+    Used by the logit-scoring fast path: the model never generates text, so the
+    chosen option letter comes from argmax over the A/B/C/D answer-token logits.
+    """
+    if letter is None or letter not in mcq["letter_to_cat"]:
+        return {"chosen_letter": letter, "parse_method": method,
+                "category": "other", "chosen_text": ""}
+    return {
+        "chosen_letter": letter,
+        "parse_method": method,
+        "category": mcq["letter_to_cat"][letter],
+        "chosen_text": mcq["letter_to_text"][letter],
     }

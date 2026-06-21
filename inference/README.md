@@ -1,6 +1,6 @@
 # Counterfactual VLM Bias Benchmark
 
-A research-grade framework for measuring **multilingual counterfactual robustness** in Vision-Language Models (VLMs): when an image and a deliberately *conflicting* text caption are presented together, does the model trust what it sees or defer to the misleading text? The framework evaluates this across languages, datasets, and 20+ model families — and captures residual-stream activations so the failure can be probed *inside* the network, not just scored at the output.
+A research-grade framework for measuring **multilingual counterfactual robustness** in Vision-Language Models (VLMs): when an image and a deliberately *conflicting* text caption are presented together, does the model trust what it sees or defer to the misleading text? The framework evaluates this across languages, datasets, and 9 model families — and captures residual-stream activations so the failure can be probed *inside* the network, not just scored at the output.
 
 Built for the [APART Global South Hackathon 2026](https://apartresearch.com).
 
@@ -78,14 +78,14 @@ The model generates free text (up to `max_new_tokens`) and a 6-strategy cascade 
 ```
 vlm_bench.py            ← engine: model loop, (batched) scoring, hidden-state capture, saving
 ├── datasets_adapter.py ← loads 4 datasets → unified Record schema
-├── models.py           ← MODEL_REGISTRY (27 VLMs) + unified loader + letter-token ids + batch builder
+├── models.py           ← MODEL_REGISTRY (27 VLMs supported; 9 benchmarked) + unified loader + letter-token ids + batch builder
 ├── classify.py         ← MCQ builder + prompt templates + answer parser/classifier
 └── analyze.py          ← post-hoc analysis: figures + per-axis layer-wise probes + report
 
 config.yaml             ← all knobs
 run.sh                  ← env-var launcher for a single sweep
-run_all_models.sh       ← one-command sweep over all 23 non-gated models
-run_19models_logit.sh   ← fast logit sweep over the 19 not-yet-done models → new folder
+run_all_models.sh       ← sweep over non-gated models (edit list inside to target set)
+run_19models_logit.sh   ← logit sweep targeting batch-able models
 ```
 
 ### Design decisions
@@ -98,41 +98,23 @@ run_19models_logit.sh   ← fast logit sweep over the 19 not-yet-done models →
 
 ---
 
-## Supported Models
+## Models Benchmarked
 
-27 VLMs (23 non-gated + 4 gated) from 10+ organisations, from ~2B to ~12B. The sweep scripts target the non-gated set; gated models need `HF_TOKEN` + accepted licenses.
+9 VLMs across 5 organisations, evaluated on all 4 datasets × all languages via logit scoring:
 
-| Key | HF ID | Origin | Gated |
-|-----|-------|--------|-------|
-| `qwen2.5-vl-7b` | Qwen/Qwen2.5-VL-7B-Instruct | 🇨🇳 Alibaba | |
-| `qwen2.5-vl-3b` | Qwen/Qwen2.5-VL-3B-Instruct | 🇨🇳 Alibaba | |
-| `qwen3-vl-8b` | Qwen/Qwen3-VL-8B-Instruct | 🇨🇳 Alibaba | |
-| `internvl3-8b` | OpenGVLab/InternVL3-8B-hf | 🇨🇳 Shanghai AI Lab | |
-| `internvl3-2b` | OpenGVLab/InternVL3-2B-hf | 🇨🇳 Shanghai AI Lab | |
-| `glm-4.1v-9b-thinking` | zai-org/GLM-4.1V-9B-Thinking | 🇨🇳 Zhipu AI | |
-| `minicpm-v-4.5` | openbmb/MiniCPM-V-4_5 | 🇨🇳 OpenBMB | |
-| `minicpm-v-4` | openbmb/MiniCPM-V-4 | 🇨🇳 OpenBMB | |
-| `ovis2-8b` | AIDC-AI/Ovis2-8B | 🇨🇳 Alibaba Intl | |
-| `kimi-vl-a3b` | moonshotai/Kimi-VL-A3B-Instruct | 🇨🇳 Moonshot AI | |
-| `deepseek-vl2-small` | deepseek-ai/deepseek-vl2-small | 🇨🇳 DeepSeek | |
-| `llama-3.2-11b-vision` | meta-llama/Llama-3.2-11B-Vision-Instruct | 🇺🇸 Meta | ✓ |
-| `phi-4-multimodal` | microsoft/Phi-4-multimodal-instruct | 🇺🇸 Microsoft | |
-| `phi-3.5-vision` | microsoft/Phi-3.5-vision-instruct | 🇺🇸 Microsoft | |
-| `molmo2-8b` | allenai/Molmo2-8B | 🇺🇸 Allen AI | |
-| `molmo-7b-d` | allenai/Molmo-7B-D-0924 | 🇺🇸 Allen AI | |
-| `granite-vision-3.3-2b` | ibm-granite/granite-vision-3.3-2b | 🇺🇸 IBM | |
-| `gemma-3-4b` | google/gemma-3-4b-it | 🇺🇸 Google | ✓ |
-| `gemma-3-12b` | google/gemma-3-12b-it | 🇺🇸 Google | ✓ |
-| `aya-vision-8b` | CohereLabs/aya-vision-8b | 🇨🇦 Cohere | ✓ |
-| `pixtral-12b` | mistral-community/pixtral-12b | 🇫🇷 Mistral | |
-| `smolvlm2-2.2b` | HuggingFaceTB/SmolVLM2-2.2B-Instruct | 🇫🇷 HF | |
-| `chitrarth` | krutrim-ai-labs/Chitrarth | 🇮🇳 Krutrim/Ola | |
-| `sea-lion-v4-8b-vl` | aisingapore/Qwen-SEA-LION-v4-8B-VL | 🇸🇬 AI Singapore | |
-| `sea-lion-v4-4b-vl` | aisingapore/Gemma-SEA-LION-v4-4B-VL | 🇸🇬 AI Singapore | |
-| `llava-onevision-7b` | llava-hf/llava-onevision-qwen2-7b-ov-hf | 🌍 Community | |
-| `moondream2` | vikhyatk/moondream2 | 🌍 Community | |
+| Key | HF ID | Origin | Size |
+|-----|-------|--------|------|
+| `qwen2.5-vl-7b` | Qwen/Qwen2.5-VL-7B-Instruct | 🇨🇳 Alibaba | 7B |
+| `qwen2.5-vl-3b` | Qwen/Qwen2.5-VL-3B-Instruct | 🇨🇳 Alibaba | 3B |
+| `qwen3-vl-8b` | Qwen/Qwen3-VL-8B-Instruct | 🇨🇳 Alibaba | 8B |
+| `internvl3-8b` | OpenGVLab/InternVL3-8B-hf | 🇨🇳 Shanghai AI Lab | 8B |
+| `internvl3-2b` | OpenGVLab/InternVL3-2B-hf | 🇨🇳 Shanghai AI Lab | 2B |
+| `glm-4.1v-9b-thinking` | zai-org/GLM-4.1V-9B-Thinking | 🇨🇳 Zhipu AI | 9B |
+| `granite-vision-3.3-2b` | ibm-granite/granite-vision-3.3-2b | 🇺🇸 IBM | 2B |
+| `llava-onevision-7b` | llava-hf/llava-onevision-qwen2-7b-ov-hf | 🌍 Community | 7B |
+| `sea-lion-v4-8b-vl` | aisingapore/Qwen-SEA-LION-v4-8B-VL | 🇸🇬 AI Singapore | 8B |
 
-Several non-gated models use custom code (`ovis2-8b`, `kimi-vl-a3b`, `deepseek-vl2-small`, `chitrarth`); a model that fails to load is logged to `errors.jsonl` and the sweep continues. Add a model with one line in `models.py:MODEL_REGISTRY`.
+The framework [`models.py`](models.py) supports 27 VLMs total (including gated models like Llama-3.2-Vision, Gemma-3, Aya-Vision). Add any model with one registry entry.
 
 ---
 

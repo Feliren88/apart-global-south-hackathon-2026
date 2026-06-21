@@ -127,7 +127,7 @@ pip install -r ../inference/requirements.txt    # same deps as the benchmark
 # Full default run (config.yaml): qwen2.5-vl-3b, all datasets/languages
 ./run.sh
 
-# Quick smoke run
+# Quick smoke run (use any of the 9 benchmarked models)
 MODELS="qwen2.5-vl-3b" DATASETS="feliren" LANGUAGES="english hindi telugu" \
   MAX_PER_GROUP=20 EVAL_CAP=30 OUTPUT_DIR=steering_smoke ./run.sh
 

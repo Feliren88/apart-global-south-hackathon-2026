@@ -121,6 +121,23 @@ def _to_str(v: Any) -> str:
     return str(v).strip()
 
 
+# Canonicalise language labels that upstream datasets spell differently for the
+# same language, so they aren't treated as separate languages. Keys are matched
+# after lowercase+strip; the value is the canonical label.
+LANG_ALIASES: dict[str, str] = {
+    "bahasa": "bahasa indonesia",          # some datasets label Indonesian "bahasa"
+    "indonesian": "bahasa indonesia",
+    "bahasa indo": "bahasa indonesia",
+}
+
+
+def _norm_lang(v: Any) -> str:
+    """Lowercase + strip a language label and fold known aliases onto one
+    canonical name (e.g. 'bahasa' -> 'bahasa indonesia')."""
+    s = _to_str(v).lower()
+    return LANG_ALIASES.get(s, s)
+
+
 def _col(row, spec_col):
     """Resolve a unified field to a source value. `spec_col` may be a single
     column name or a list of fallback names (first present wins) — tolerant of
@@ -157,14 +174,17 @@ def load_records(
     lang_filter = None
     if languages is not None and languages != "all":
         langs = [languages] if isinstance(languages, str) else list(languages)
-        wanted = {str(l).strip().lower() for l in langs}
+        # Normalise the requested labels through the alias map too, so asking for
+        # either spelling (e.g. "bahasa" or "bahasa indonesia") matches the
+        # canonical language.
+        wanted = {_norm_lang(l) for l in langs}
         if "all" not in wanted:
             lang_filter = wanted
 
     # Group indices by language so caps are applied per-language.
     by_lang: dict[str, list[int]] = {}
     for i in range(len(ds)):
-        lang = _to_str(_col(ds[i], cols["language"])).lower()
+        lang = _norm_lang(_col(ds[i], cols["language"]))
         if lang_filter is not None and lang not in lang_filter:
             continue
         by_lang.setdefault(lang, []).append(i)
@@ -201,4 +221,4 @@ def load_records(
 def available_languages(dataset_key: str, cache_dir: str | None = None) -> list[str]:
     spec = DATASET_REGISTRY[dataset_key]
     ds = load_dataset(spec["hf_id"], split=spec["split"], cache_dir=cache_dir)
-    return sorted({_to_str(_col(r, spec["cols"]["language"])).lower() for r in ds})
+    return sorted({_norm_lang(_col(r, spec["cols"]["language"])) for r in ds})
